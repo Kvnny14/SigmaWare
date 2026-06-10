@@ -1,5 +1,4 @@
--- [BETA] SkibidiWare Release v0.7
-
+-- SkibidiWare v0.8
 
 local Players    = game:GetService("Players")
 local UIS        = game:GetService("UserInputService")
@@ -7,7 +6,7 @@ local Lighting   = game:GetService("Lighting")
 local RunService = game:GetService("RunService")
 local Stats      = game:GetService("Stats")
 local CoreGui    = game:GetService("CoreGui")
-
+local CollectionService = game:GetService("CollectionService")
 local player = Players.LocalPlayer
 
 -- ── Saved lighting ───────────────────────────────────────────────────────────
@@ -22,6 +21,8 @@ local originalLighting = {
 }
 
 -- ── Helpers ──────────────────────────────────────────────────────────────────
+local currentRainbow = Color3.fromRGB(255, 0, 0)
+
 local function rainbow()
 	return Color3.fromHSV((tick() % 10) / 15, 1, 1)
 end
@@ -33,12 +34,6 @@ local function getPlayerColor(p)
 		playerColors[p.UserId] = Color3.fromHSV(h, 0.85, 1)
 	end
 	return playerColors[p.UserId]
-end
-
-local function worldToViewport(pos)
-	local cam = workspace.CurrentCamera
-	local vp, onScreen = cam:WorldToViewportPoint(pos)
-	return Vector2.new(vp.X, vp.Y), onScreen, vp.Z
 end
 
 -- ── GUI root ─────────────────────────────────────────────────────────────────
@@ -344,15 +339,13 @@ end
 
 -- ── Rage page ─────────────────────────────────────────────────────────────────
 local rageMain  = group(pages.Rage, "Main",  PAD, PAD, 275, 200)
-local rageOther = group(pages.Rage, "Other", 305, PAD, 275, 200)
-
--- ── Module references (resolved once at load time) ────────────────────────────
 local RS      = game:GetService("ReplicatedStorage")
 local modules = RS:FindFirstChild("Modules")
 
 local GunController    = nil
 local CameraController = nil
 local FirearmRuntime   = nil
+local AmmoPool         = nil
 
 local function safeRequire(obj)
 	if not obj then return nil end
@@ -366,6 +359,10 @@ if modules then
 		GunController    = safeRequire(clientControllers:FindFirstChild("GunController"))
 		CameraController = safeRequire(clientControllers:FindFirstChild("CameraController"))
 	end
+	local shared = modules:FindFirstChild("Shared")
+	if shared then
+		AmmoPool = safeRequire(shared:FindFirstChild("AmmoPool"))
+	end
 end
 
 local runtimeRegistry = RS:FindFirstChild("Registries") and RS.Registries:FindFirstChild("FirearmRuntime")
@@ -374,62 +371,39 @@ if runtimeRegistry then
 end
 
 -- ── Fire Rate ─────────────────────────────────────────────────────────────────
-
-local originalFireRates = {}  -- [data_ref_id] = original value
+local originalFireRates = {}
 
 local function setFireRate(sliderVal)
-	-- sliderVal: 0 = stock, 100 = fastest (0.08 s between shots)
-	local targetRate = 0.08 + (1 - sliderVal / 100) * 0.92  -- 0.08 at 100, 1.0 at 0 (arbitrary stock cap)
-
-	-- Patch the runtime table entries
+	local targetRate = 0.08 + (1 - sliderVal / 100) * 0.92
 	if FirearmRuntime then
 		for id, data in pairs(FirearmRuntime) do
 			if type(data) == "table" and data.FireRate then
-				-- save original per entry once
-				if originalFireRates[id] == nil then
-					originalFireRates[id] = data.FireRate
-				end
-				if sliderVal == 0 then
-					data.FireRate = originalFireRates[id]
-				else
-					data.FireRate = math.max(0.08, math.min(originalFireRates[id], targetRate))
-				end
+				if originalFireRates[id] == nil then originalFireRates[id] = data.FireRate end
+				data.FireRate = sliderVal == 0 and originalFireRates[id] or math.max(0.08, math.min(originalFireRates[id], targetRate))
 			end
 		end
 	end
-
-	-- Patch the currently held weapon on GunController
-	if GunController then
-		if GunController.Weapon then
-			if originalFireRates["_weapon"] == nil then
-				originalFireRates["_weapon"] = GunController.Weapon.FireRate
-			end
-			if sliderVal == 0 then
-				GunController.Weapon.FireRate = originalFireRates["_weapon"]
-			else
-				GunController.Weapon.FireRate = math.max(0.08, math.min(
-					originalFireRates["_weapon"] or 0.5, targetRate))
-			end
-		end
+	if GunController and GunController.Weapon then
+		local w = GunController.Weapon
+		if originalFireRates["_weapon"] == nil then originalFireRates["_weapon"] = w.FireRate end
+		w.FireRate = sliderVal == 0 and originalFireRates["_weapon"] or math.max(0.08, math.min(originalFireRates["_weapon"] or 0.5, targetRate))
 	end
 end
 
 -- ── Recoil ────────────────────────────────────────────────────────────────────
-
-
 local savedRecoilFuncs = {}
 
 local function enableNoRecoil()
 	if GunController then
-		savedRecoilFuncs.ApplyRecoil          = GunController.ApplyRecoil
-		savedRecoilFuncs._FireScriptedRecoil  = GunController._FireScriptedRecoil
-		GunController.ApplyRecoil             = function() end
-		GunController._FireScriptedRecoil     = function() end
+		savedRecoilFuncs.ApplyRecoil         = GunController.ApplyRecoil
+		savedRecoilFuncs._FireScriptedRecoil = GunController._FireScriptedRecoil
+		GunController.ApplyRecoil            = function() end
+		GunController._FireScriptedRecoil    = function() end
 	end
 	if CameraController then
-		savedRecoilFuncs.Recoil               = CameraController.Recoil
-		savedRecoilFuncs.BoomKick             = CameraController.BoomKick
-		savedRecoilFuncs.SetRecoilProfile     = CameraController.SetRecoilProfile
+		savedRecoilFuncs.Recoil           = CameraController.Recoil
+		savedRecoilFuncs.BoomKick         = CameraController.BoomKick
+		savedRecoilFuncs.SetRecoilProfile = CameraController.SetRecoilProfile
 		if CameraController.Recoil           then CameraController.Recoil           = function() end end
 		if CameraController.BoomKick         then CameraController.BoomKick         = function() end end
 		if CameraController.SetRecoilProfile then CameraController.SetRecoilProfile = function() end end
@@ -449,14 +423,303 @@ local function disableNoRecoil()
 	savedRecoilFuncs = {}
 end
 
+-- ── Overflow Ammo ─────────────────────────────────────────────────────────────
+local OA_MAG     = 999
+local OA_RESERVE = 9999
+local oaEnabled     = false
+local oaRespawnConn = nil
+local oaOrigMaxMag  = {}
+local oaOrigMaxRes  = {}
+
+local function oaRaiseReserveCeiling(cap)
+	if not AmmoPool then return end
+	for ammoType, orig in pairs(AmmoPool._maxReserve) do
+		if ammoType ~= "infinite" then
+			if not oaOrigMaxRes[ammoType] then oaOrigMaxRes[ammoType] = orig end
+			AmmoPool._maxReserve[ammoType] = cap
+		end
+	end
+end
+
+local function oaRestoreReserveCeiling()
+	if not AmmoPool then return end
+	for ammoType, orig in pairs(oaOrigMaxRes) do AmmoPool._maxReserve[ammoType] = orig end
+	oaOrigMaxRes = {}
+end
+
+local function oaSetReserveDirect(ammoType, value)
+	if not AmmoPool then return end
+	AmmoPool._pools[ammoType] = value
+	if AmmoPool.AmmoChanged then AmmoPool.AmmoChanged:Fire(ammoType, value, value) end
+end
+
+local function oaRaiseMagCeiling(weapon, newMax)
+	if not oaOrigMaxMag[weapon.Name] then oaOrigMaxMag[weapon.Name] = weapon.MaxMagSize end
+	weapon.MaxMagSize = newMax
+end
+
+local function oaRestoreMagCeiling(weapon)
+	local orig = oaOrigMaxMag[weapon.Name]
+	if orig then weapon.MaxMagSize = orig; oaOrigMaxMag[weapon.Name] = nil end
+end
+
+local function oaFillMag()
+	if not GunController then return end
+	local w = GunController.Weapon
+	if not w or w.AmmoType == "none" then return end
+	oaRaiseMagCeiling(w, OA_MAG)
+	w.MagAmmo = OA_MAG
+	local reserve = (w.GetReserve and w:GetReserve()) or 0
+	if w.AmmoChanged             then w.AmmoChanged:Fire(OA_MAG, reserve) end
+	if GunController.AmmoChanged then GunController.AmmoChanged:Fire(OA_MAG, reserve) end
+end
+
+local function oaFillReserves()
+	if not AmmoPool then return end
+	oaRaiseReserveCeiling(OA_RESERVE)
+	for ammoType in pairs(AmmoPool._maxReserve) do
+		if ammoType ~= "infinite" then oaSetReserveDirect(ammoType, OA_RESERVE) end
+	end
+	if GunController and GunController.AmmoChanged then
+		local w = GunController.Weapon
+		if w then GunController.AmmoChanged:Fire(w.MagAmmo, (w.GetReserve and w:GetReserve()) or OA_RESERVE) end
+	end
+end
+
+local function oaFillAll() oaFillMag(); oaFillReserves() end
+
+local function oaDisable()
+	oaEnabled = false
+	oaRestoreReserveCeiling()
+	oaStopRespawnWatch()
+end
+
+local function oaStartRespawnWatch()
+	if oaRespawnConn then return end
+	oaRespawnConn = player.CharacterAdded:Connect(function()
+		task.wait()
+		if oaEnabled then oaFillAll() end
+	end)
+end
+
+function oaStopRespawnWatch()
+	if oaRespawnConn then oaRespawnConn:Disconnect(); oaRespawnConn = nil end
+end
+
+if GunController and GunController.WeaponChanged then
+	GunController.WeaponChanged:Connect(function(newWeapon)
+		if not oaEnabled or not newWeapon or newWeapon.AmmoType == "none" then return end
+		task.wait()
+		oaRaiseMagCeiling(newWeapon, OA_MAG)
+		newWeapon.MagAmmo = OA_MAG
+		local reserve = (newWeapon.GetReserve and newWeapon:GetReserve()) or 0
+		if newWeapon.AmmoChanged     then newWeapon.AmmoChanged:Fire(OA_MAG, reserve) end
+		if GunController.AmmoChanged then GunController.AmmoChanged:Fire(OA_MAG, reserve) end
+	end)
+end
+
+-- ── Force Fire Mode ───────────────────────────────────────────────────────────
+local ffmEnabled    = false
+local ffmOrigModes  = {}
+local ffmWeaponConn = nil
+
+local function ffmBackupAndForce(w)
+	if not w or w.FireMode == "none" then return end
+	if not ffmOrigModes[w.Name] then
+		local cfg = w.Config or {}
+		ffmOrigModes[w.Name] = {
+			fire_modes = cfg.fire_modes and table.clone(cfg.fire_modes) or { w.FireMode },
+			FireMode   = w.FireMode,
+		}
+	end
+	if w.Config then w.Config.fire_modes = { "auto" } end
+	w.FireMode = "auto"; w.BurstCount = 0
+	if GunController._fireModeMemory then GunController._fireModeMemory[w.Name] = "auto" end
+	if GunController.FireModeChanged  then GunController.FireModeChanged:Fire("auto") end
+end
+
+local function ffmRestoreOne(w)
+	if not w then return end
+	local backup = ffmOrigModes[w.Name]
+	if not backup then return end
+	if w.Config then w.Config.fire_modes = backup.fire_modes end
+	w.FireMode = backup.FireMode; w.BurstCount = 0
+	if GunController._fireModeMemory then GunController._fireModeMemory[w.Name] = backup.FireMode end
+	if GunController.FireModeChanged  then GunController.FireModeChanged:Fire(backup.FireMode) end
+	ffmOrigModes[w.Name] = nil
+end
+
+local function ffmEnable()
+	if GunController and GunController.Weapon then ffmBackupAndForce(GunController.Weapon) end
+	if GunController and GunController.WeaponChanged then
+		ffmWeaponConn = GunController.WeaponChanged:Connect(function(newWeapon)
+			if not ffmEnabled or not newWeapon then return end
+			task.wait()
+			ffmBackupAndForce(newWeapon)
+		end)
+	end
+end
+
+local function ffmDisable()
+	if ffmWeaponConn then ffmWeaponConn:Disconnect(); ffmWeaponConn = nil end
+	if GunController and GunController.Weapon then ffmRestoreOne(GunController.Weapon) end
+	ffmOrigModes = {}
+end
+
+-- ── Hitbox Debug ──────────────────────────────────────────────────────────────
+local HITBOX_TAG    = "MercBodyPart"
+local headScale     = 1
+local hitboxEnabled = false
+local visualiserOn  = false
+local originalSizes  = {}
+local selectionBoxes = {}
+
+local function isLiveHead(part)
+	if not part or part.Name ~= "Head" then return false end
+	local model = part:FindFirstAncestorOfClass("Model")
+	if not model then return false end
+	if model.Name:find("_Corpse") or model:GetAttribute("Dead") then return false end
+	return true
+end
+
+local function scaleHead(part)
+	if not isLiveHead(part) then return end
+	if not originalSizes[part] then originalSizes[part] = part.Size end
+	part.Size = originalSizes[part] * headScale
+end
+
+local function applyHitboxScale()
+	for _, part in ipairs(CollectionService:GetTagged(HITBOX_TAG)) do
+		if isLiveHead(part) then scaleHead(part) end
+	end
+end
+
+local function restoreHitboxAll()
+	for part, origSize in pairs(originalSizes) do
+		if part and part.Parent then part.Size = origSize end
+	end
+	originalSizes = {}
+end
+
+local function addVisBox(part)
+	if selectionBoxes[part] then return end
+	local box = Instance.new("SelectionBox")
+	box.Adornee             = part
+	box.Color3              = Color3.fromRGB(255, 0, 200)
+	box.LineThickness       = 0.05
+	box.SurfaceTransparency = 0.7
+	box.SurfaceColor3       = Color3.fromRGB(255, 0, 200)
+	box.Parent              = workspace
+	selectionBoxes[part]    = box
+end
+
+local function clearVisualiser()
+	for _, box in pairs(selectionBoxes) do if box and box.Parent then box:Destroy() end end
+	selectionBoxes = {}
+end
+
+local function buildVisualiser()
+	clearVisualiser()
+	for _, part in ipairs(CollectionService:GetTagged(HITBOX_TAG)) do
+		if isLiveHead(part) then addVisBox(part) end
+	end
+end
+
+CollectionService:GetInstanceAddedSignal(HITBOX_TAG):Connect(function(part)
+	task.defer(function()
+		if hitboxEnabled and isLiveHead(part) then
+			scaleHead(part)
+			if visualiserOn then addVisBox(part) end
+		end
+	end)
+end)
+CollectionService:GetInstanceRemovedSignal(HITBOX_TAG):Connect(function(part)
+	originalSizes[part] = nil
+	local box = selectionBoxes[part]
+	if box and box.Parent then box:Destroy() end
+	selectionBoxes[part] = nil
+end)
+
 -- ── Rage Main UI ──────────────────────────────────────────────────────────────
 checkbox(rageMain, "No Recoil", 12, 18, function(enabled)
 	if enabled then enableNoRecoil() else disableNoRecoil() end
 end)
 
-slider(rageMain, "Fire Rate", 12, 38, 0, 100, 0, function(val)
-	setFireRate(val)
+slider(rageMain, "Fire Rate", 12, 38, 0, 100, 0, function(val) setFireRate(val) end)
+
+checkbox(rageMain, "Inf. Ammo", 12, 78, function(enabled)
+	oaEnabled = enabled
+	if enabled then oaFillAll(); oaStartRespawnWatch() else oaDisable() end
 end)
+
+checkbox(rageMain, "Force Full Auto", 12, 98, function(enabled)
+	ffmEnabled = enabled
+	if enabled then ffmEnable() else ffmDisable() end
+end)
+
+local hitboxGroup = group(pages.Rage, "Hitbox", 305, PAD, 275, 110)
+local visCheckFill
+
+checkbox(hitboxGroup, "Enable Head Hitbox", 12, 18, function(enabled)
+	hitboxEnabled = enabled
+	if enabled then
+		applyHitboxScale()
+	else
+		restoreHitboxAll()
+		clearVisualiser()
+		visualiserOn = false
+		if visCheckFill then visCheckFill.Visible = false end
+	end
+end)
+
+slider(hitboxGroup, "Head Scale", 12, 38, 1, 10, 1, function(val)
+	headScale = val
+	if hitboxEnabled then applyHitboxScale() end
+end)
+
+do
+	local state  = false
+	local holder = Instance.new("TextButton")
+	holder.Size                   = UDim2.fromOffset(240, 16)
+	holder.Position               = UDim2.fromOffset(12, 78)
+	holder.BackgroundTransparency = 1
+	holder.Text                   = ""
+	holder.Parent                 = hitboxGroup
+
+	local box = Instance.new("Frame")
+	box.Size             = UDim2.fromOffset(12, 12)
+	box.Position         = UDim2.fromOffset(0, 2)
+	box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	box.BorderColor3     = Color3.fromRGB(80, 80, 80)
+	box.Parent           = holder
+
+	local fill = Instance.new("Frame")
+	fill.Size            = UDim2.new(1, -4, 1, -4)
+	fill.Position        = UDim2.fromOffset(2, 2)
+	fill.BorderSizePixel = 0
+	fill.Visible         = false
+	fill.Parent          = box
+	table.insert(_G._SW_RainbowFills, fill)
+	visCheckFill = fill
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size                   = UDim2.new(1, -18, 1, 0)
+	lbl.Position               = UDim2.fromOffset(18, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.Text                   = "Visualiser"
+	lbl.Font                   = Enum.Font.Arial
+	lbl.TextSize               = 12
+	lbl.TextColor3             = Color3.fromRGB(220, 220, 220)
+	lbl.TextXAlignment         = Enum.TextXAlignment.Left
+	lbl.Parent                 = holder
+
+	holder.MouseButton1Click:Connect(function()
+		state        = not state
+		fill.Visible = state
+		visualiserOn = state
+		if state and hitboxEnabled then buildVisualiser() else clearVisualiser() end
+	end)
+end
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- VISUALS PAGE
@@ -464,34 +727,27 @@ end)
 local playersGroup = group(pages.Visuals, "Players", PAD, PAD, 275, 300)
 local worldGroup   = group(pages.Visuals, "World",   305, PAD, 275, 320)
 
--- ── ESP CONFIG STATE ─────────────────────────────────────────────────────────
-local espEnabled       = false
-local espConnections   = {}
-local espHighlights    = {}
-local espSubOptions    = {}
+local espEnabled      = false
+local espConnections  = {}
+local espHighlights   = {}
+local espSubOptions   = {}
 
-local showNames        = false
-local showDistance     = false
-local showHealthBar    = false
-local showHeadDot      = false
-local showBoxESP       = false
+local showNames     = false
+local showDistance  = false
+local showHealthBar = false
+local showHeadDot   = false
+local showBoxESP    = false
 
-local espColorMode     = "unique"
-local espFillAlpha     = 0.5
-local espOutlineAlpha  = 0
+local espColorMode    = "unique"
+local espFillAlpha    = 0.5
+local espOutlineAlpha = 0
 
--- ── ESP COLOR RESOLVER ───────────────────────────────────────────────────────
 local function resolveESPColor(p)
-	if espColorMode == "rainbow" then
-		return rainbow()
-	elseif espColorMode == "team" and p.Team then
-		return p.Team.TeamColor.Color
-	else
-		return getPlayerColor(p)
-	end
+	if espColorMode == "rainbow" then return currentRainbow
+	elseif espColorMode == "team" and p.Team then return p.Team.TeamColor.Color
+	else return getPlayerColor(p) end
 end
 
--- ── ESP CORE ─────────────────────────────────────────────────────────────────
 local function removeESP(character)
 	if not espHighlights[character] then return end
 	for _, v in pairs(espHighlights[character]) do
@@ -508,12 +764,10 @@ local function applyESP(p)
 	espHighlights[character] = {}
 	local track = espHighlights[character]
 
-	local hrp  = character:FindFirstChild("HumanoidRootPart")
-	          or character:FindFirstChildWhichIsA("BasePart")
+	local hrp  = character:FindFirstChild("HumanoidRootPart") or character:FindFirstChildWhichIsA("BasePart")
 	local head = character:FindFirstChild("Head")
 	local col  = resolveESPColor(p)
 
-	-- ── Highlight glow ────────────────────────────────────────────────────────
 	local highlight = Instance.new("Highlight")
 	highlight.Name                = "PlayerESP"
 	highlight.Adornee             = character
@@ -525,140 +779,94 @@ local function applyESP(p)
 	highlight.Parent              = character
 	table.insert(track, highlight)
 
-	-- ── Name label (above box) ────────────────────────────────────────────────
 	local nameBB = Instance.new("BillboardGui")
-	nameBB.Name        = "ESPNameBillboard"
-	nameBB.Size        = UDim2.fromOffset(160, 18)
-	nameBB.StudsOffset = Vector3.new(0, 3.5, 0)
-	nameBB.AlwaysOnTop = true
-	nameBB.Adornee     = hrp
-	nameBB.Enabled     = showNames
-	nameBB.Parent      = character
+	nameBB.Name = "ESPNameBillboard"; nameBB.Size = UDim2.fromOffset(160, 18)
+	nameBB.StudsOffset = Vector3.new(0, 3.5, 0); nameBB.AlwaysOnTop = true
+	nameBB.Adornee = hrp; nameBB.Enabled = showNames; nameBB.Parent = character
 
 	local nameLabel = Instance.new("TextLabel")
-	nameLabel.Size                   = UDim2.fromScale(1, 1)
-	nameLabel.BackgroundTransparency = 1
-	nameLabel.Font                   = Enum.Font.ArialBold
-	nameLabel.TextSize               = 13
-	nameLabel.TextStrokeTransparency = 0
-	nameLabel.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
-	nameLabel.TextColor3             = col
-	nameLabel.Text                   = p.Name
-	nameLabel.Parent                 = nameBB
+	nameLabel.Size = UDim2.fromScale(1,1); nameLabel.BackgroundTransparency = 1
+	nameLabel.Font = Enum.Font.ArialBold; nameLabel.TextSize = 13
+	nameLabel.TextStrokeTransparency = 0; nameLabel.TextStrokeColor3 = Color3.fromRGB(0,0,0)
+	nameLabel.TextColor3 = col; nameLabel.Text = p.Name; nameLabel.Parent = nameBB
 	table.insert(track, nameBB)
 
-	-- ── Distance label (below box) ────────────────────────────────────────────
-	-- StudsOffset Y=-3.5 places it just below the feet.
 	local distBB = Instance.new("BillboardGui")
-	distBB.Name        = "ESPDistBillboard"
-	distBB.Size        = UDim2.fromOffset(100, 14)
-	distBB.StudsOffset = Vector3.new(0, -3.5, 0)
-	distBB.AlwaysOnTop = true
-	distBB.Adornee     = hrp
-	distBB.Enabled     = showDistance
-	distBB.Parent      = character
+	distBB.Name = "ESPDistBillboard"; distBB.Size = UDim2.fromOffset(100, 14)
+	distBB.StudsOffset = Vector3.new(0, -3.5, 0); distBB.AlwaysOnTop = true
+	distBB.Adornee = hrp; distBB.Enabled = showDistance; distBB.Parent = character
 
 	local distLabel = Instance.new("TextLabel")
-	distLabel.Size                   = UDim2.fromScale(1, 1)
-	distLabel.BackgroundTransparency = 1
-	distLabel.Font                   = Enum.Font.Arial
-	distLabel.TextSize               = 11
-	distLabel.TextStrokeTransparency = 0
-	distLabel.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
-	distLabel.TextColor3             = col
-	distLabel.Text                   = "0m"
-	distLabel.Parent                 = distBB
+	distLabel.Size = UDim2.fromScale(1,1); distLabel.BackgroundTransparency = 1
+	distLabel.Font = Enum.Font.Arial; distLabel.TextSize = 11
+	distLabel.TextStrokeTransparency = 0; distLabel.TextStrokeColor3 = Color3.fromRGB(0,0,0)
+	distLabel.TextColor3 = col; distLabel.Text = "0m"; distLabel.Parent = distBB
 	table.insert(track, distBB)
 
-	-- ── Head dot ─────────────────────────────────────────────────────────────
+	local headDotBB, dotFrame
 	if head then
-		local headDotBB = Instance.new("BillboardGui")
-		headDotBB.Name        = "ESPHeadDot"
-		headDotBB.Size        = UDim2.fromOffset(0, 0)
-		headDotBB.SizeOffset  = Vector2.new(0.7, 0.7)   -- ~0.7 studs diameter, scales with distance
-		headDotBB.StudsOffset = Vector3.new(0, 0.4, 0)
-		headDotBB.AlwaysOnTop = true
-		headDotBB.Adornee     = head
-		headDotBB.Enabled     = showHeadDot
-		headDotBB.Parent      = character
+		headDotBB = Instance.new("BillboardGui")
+		headDotBB.Name = "ESPHeadDot"; headDotBB.Size = UDim2.fromOffset(0, 0)
+		headDotBB.SizeOffset = Vector2.new(0.7, 0.7); headDotBB.StudsOffset = Vector3.new(0, 0.4, 0)
+		headDotBB.AlwaysOnTop = true; headDotBB.Adornee = head
+		headDotBB.Enabled = showHeadDot; headDotBB.Parent = character
 
-		local dot = Instance.new("Frame")
-		dot.Size                   = UDim2.fromScale(1, 1)
-		dot.BackgroundColor3       = col
-		dot.BackgroundTransparency = 0.3
-		dot.BorderSizePixel        = 0
-		local corner = Instance.new("UICorner")
-		corner.CornerRadius = UDim.new(1, 0)
-		corner.Parent       = dot
-		dot.Parent          = headDotBB
+		dotFrame = Instance.new("Frame")
+		dotFrame.Size = UDim2.fromScale(1,1); dotFrame.BackgroundColor3 = col
+		dotFrame.BackgroundTransparency = 0.3; dotFrame.BorderSizePixel = 0
+		local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(1,0); corner.Parent = dotFrame
+		dotFrame.Parent = headDotBB
 		table.insert(track, headDotBB)
 	end
 
-	-- ── Box ESP (BillboardGui 4-line border) ──────────────────────────────────
 	local boxBB = Instance.new("BillboardGui")
-	boxBB.Name                  = "ESPBoxBillboard"
-	boxBB.Size                  = UDim2.fromOffset(30, 52)
-	boxBB.StudsOffsetWorldSpace = Vector3.new(0, 0, 0)
-	boxBB.AlwaysOnTop           = true
-	boxBB.Adornee               = hrp
-	boxBB.Enabled               = showBoxESP
-	boxBB.Parent                = character
+	boxBB.Name = "ESPBoxBillboard"; boxBB.Size = UDim2.fromOffset(30, 52)
+	boxBB.StudsOffsetWorldSpace = Vector3.new(0,0,0); boxBB.AlwaysOnTop = true
+	boxBB.Adornee = hrp; boxBB.Enabled = showBoxESP; boxBB.Parent = character
 
 	local T = 1
 	local function makeBoxLine(sx, sy, px, py)
 		local l = Instance.new("Frame")
-		l.Size             = UDim2.fromOffset(sx, sy)
-		l.Position         = UDim2.fromOffset(px, py)
-		l.BackgroundColor3 = col
-		l.BorderSizePixel  = 0
-		l.Parent           = boxBB
+		l.Size = UDim2.fromOffset(sx, sy); l.Position = UDim2.fromOffset(px, py)
+		l.BackgroundColor3 = col; l.BorderSizePixel = 0; l.Parent = boxBB
 		return l
 	end
-	local bTop   = makeBoxLine(30, T, 0,      0)
-	local bBot   = makeBoxLine(30, T, 0,      52 - T)
-	local bLeft  = makeBoxLine(T, 52, 0,      0)
+	local bTop   = makeBoxLine(30, T, 0, 0)
+	local bBot   = makeBoxLine(30, T, 0, 52 - T)
+	local bLeft  = makeBoxLine(T, 52, 0, 0)
 	local bRight = makeBoxLine(T, 52, 30 - T, 0)
 	table.insert(track, boxBB)
 
-	-- ── Health bar (vertical, left side of box) ───────────────────────────────
-	-- StudsOffset X=-1.8 puts it just to the left of the box edge
 	local healthBB = Instance.new("BillboardGui")
-	healthBB.Name        = "ESPHealthBar"
-	healthBB.Size        = UDim2.fromOffset(4, 52)  -- matches box height
-	healthBB.StudsOffset = Vector3.new(-1.8, 0, 0)
-	healthBB.AlwaysOnTop = true
-	healthBB.Adornee     = hrp
-	healthBB.Enabled     = showHealthBar
-	healthBB.Parent      = character
+	healthBB.Name = "ESPHealthBar"; healthBB.Size = UDim2.fromOffset(4, 52)
+	healthBB.StudsOffset = Vector3.new(-1.8, 0, 0); healthBB.AlwaysOnTop = true
+	healthBB.Adornee = hrp; healthBB.Enabled = showHealthBar; healthBB.Parent = character
 
 	local barBg = Instance.new("Frame")
-	barBg.Size             = UDim2.fromScale(1, 1)
-	barBg.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-	barBg.BorderSizePixel  = 0
-	barBg.Parent           = healthBB
-
-	local barCorner = Instance.new("UICorner")
-	barCorner.CornerRadius = UDim.new(0, 2)
-	barCorner.Parent = barBg
+	barBg.Size = UDim2.fromScale(1,1); barBg.BackgroundColor3 = Color3.fromRGB(20,20,20)
+	barBg.BorderSizePixel = 0; barBg.Parent = healthBB
+	local barCorner = Instance.new("UICorner"); barCorner.CornerRadius = UDim.new(0,2); barCorner.Parent = barBg
 
 	local barFill = Instance.new("Frame")
-	barFill.Name             = "HealthFill"
-	barFill.Size             = UDim2.fromScale(1, 1)
-	barFill.BackgroundColor3 = Color3.fromRGB(80, 255, 80)
-	barFill.BorderSizePixel  = 0
-	barFill.AnchorPoint      = Vector2.new(0, 1)
-	barFill.Position         = UDim2.fromScale(0, 1)
-	barFill.Parent           = barBg
+	barFill.Name = "HealthFill"; barFill.Size = UDim2.fromScale(1,1)
+	barFill.BackgroundColor3 = Color3.fromRGB(80,255,80); barFill.BorderSizePixel = 0
+	barFill.AnchorPoint = Vector2.new(0,1); barFill.Position = UDim2.fromScale(0,1)
+	barFill.Parent = barBg
 	table.insert(track, healthBB)
 
-	-- ── Per-frame updater ─────────────────────────────────────────────────────
+	local lchar = player.Character
+	local lroot = lchar and lchar:FindFirstChild("HumanoidRootPart")
+
+	local lrootConn = player.CharacterAdded:Connect(function(newChar)
+		lroot = newChar:WaitForChild("HumanoidRootPart", 5)
+	end)
+	table.insert(track, lrootConn)
+
+	local hum = character:FindFirstChildWhichIsA("Humanoid")
+	local eroot = character:FindFirstChild("HumanoidRootPart")
+
 	local conn = RunService.RenderStepped:Connect(function()
 		if not character or not character.Parent then return end
-
-		local hum   = character:FindFirstChildWhichIsA("Humanoid")
-		local lchar = player.Character
-		local lroot = lchar and lchar:FindFirstChild("HumanoidRootPart")
-		local eroot = character:FindFirstChild("HumanoidRootPart")
 
 		local c = resolveESPColor(p)
 		highlight.FillColor           = c
@@ -668,17 +876,9 @@ local function applyESP(p)
 
 		nameLabel.TextColor3 = c
 		distLabel.TextColor3 = c
-		if head then
-			local hd = character:FindFirstChild("ESPHeadDot")
-			if hd then
-				local dot2 = hd:FindFirstChildWhichIsA("Frame")
-				if dot2 then dot2.BackgroundColor3 = c end
-			end
-		end
-		bTop.BackgroundColor3   = c
-		bBot.BackgroundColor3   = c
-		bLeft.BackgroundColor3  = c
-		bRight.BackgroundColor3 = c
+		if dotFrame then dotFrame.BackgroundColor3 = c end
+		bTop.BackgroundColor3 = c; bBot.BackgroundColor3 = c
+		bLeft.BackgroundColor3 = c; bRight.BackgroundColor3 = c
 
 		if showDistance and lroot and eroot then
 			distLabel.Text = math.floor((lroot.Position - eroot.Position).Magnitude) .. "m"
@@ -686,10 +886,8 @@ local function applyESP(p)
 
 		if hum then
 			local pct = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
-			local r   = math.floor(255 * (1 - pct))
-			local g   = math.floor(255 * pct)
 			barFill.Size             = UDim2.new(1, 0, pct, 0)
-			barFill.BackgroundColor3 = Color3.fromRGB(r, g, 0)
+			barFill.BackgroundColor3 = Color3.fromRGB(math.floor(255*(1-pct)), math.floor(255*pct), 0)
 		end
 	end)
 	table.insert(track, conn)
@@ -700,22 +898,16 @@ local function enableESP()
 		if p ~= player then
 			applyESP(p)
 			local c1 = p.CharacterAdded:Connect(function()
-				task.wait(0.5)
-				applyESP(p)
+				task.wait(0.5); applyESP(p)
 			end)
-			local c2 = p.CharacterRemoving:Connect(function(char)
-				removeESP(char)
-			end)
+			local c2 = p.CharacterRemoving:Connect(function(char) removeESP(char) end)
 			table.insert(espConnections, c1)
 			table.insert(espConnections, c2)
 		end
 	end
-	local c3 = Players.PlayerAdded:Connect(function(p)
-		if p ~= player then
-			p.CharacterAdded:Connect(function()
-				task.wait(0.5)
-				applyESP(p)
-			end)
+	local c3 = Players.PlayerAdded:Connect(function(p2)
+		if p2 ~= player then
+			p2.CharacterAdded:Connect(function() task.wait(0.5); applyESP(p2) end)
 		end
 	end)
 	table.insert(espConnections, c3)
@@ -727,7 +919,7 @@ local function disableESP()
 	end
 	espConnections = {}
 	for character in pairs(espHighlights) do removeESP(character) end
-	espHighlights  = {}
+	espHighlights = {}
 end
 
 local function refreshESPBillboards()
@@ -769,34 +961,23 @@ sub("Distance",   80,  function(e) showDistance  = e; refreshESPBillboards() end
 sub("Health Bar", 100, function(e) showHealthBar = e; refreshESPBillboards() end)
 sub("Head Dot",   120, function(e) showHeadDot   = e; refreshESPBillboards() end)
 
--- Color mode
 local colorLabel = Instance.new("TextLabel")
-colorLabel.Size                   = UDim2.fromOffset(240, 14)
-colorLabel.Position               = UDim2.fromOffset(22, 142)
-colorLabel.BackgroundTransparency = 1
-colorLabel.Font                   = Enum.Font.Arial
-colorLabel.TextSize               = 11
-colorLabel.TextColor3             = Color3.fromRGB(160, 160, 160)
-colorLabel.TextXAlignment         = Enum.TextXAlignment.Left
-colorLabel.Text                   = "Color Mode:"
-colorLabel.Visible                = false
-colorLabel.Parent                 = playersGroup
+colorLabel.Size = UDim2.fromOffset(240, 14); colorLabel.Position = UDim2.fromOffset(22, 142)
+colorLabel.BackgroundTransparency = 1; colorLabel.Font = Enum.Font.Arial; colorLabel.TextSize = 11
+colorLabel.TextColor3 = Color3.fromRGB(160, 160, 160); colorLabel.TextXAlignment = Enum.TextXAlignment.Left
+colorLabel.Text = "Color Mode:"; colorLabel.Visible = false; colorLabel.Parent = playersGroup
 table.insert(espSubOptions, colorLabel)
 
 local colorModes   = {"Unique", "Rainbow", "Team"}
 local colorButtons = {}
 for i, mode in ipairs(colorModes) do
 	local b = Instance.new("TextButton")
-	b.Size             = UDim2.fromOffset(58, 14)
-	b.Position         = UDim2.fromOffset(22 + (i - 1) * 62, 158)
-	b.Text             = mode
-	b.Font             = Enum.Font.Arial
-	b.TextSize         = 10
-	b.TextColor3       = Color3.fromRGB(200, 200, 200)
+	b.Size = UDim2.fromOffset(58, 14); b.Position = UDim2.fromOffset(22 + (i-1)*62, 158)
+	b.Text = mode; b.Font = Enum.Font.Arial; b.TextSize = 10
+	b.TextColor3 = Color3.fromRGB(200, 200, 200)
 	b.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-	b.BorderColor3     = Color3.fromRGB(70, 70, 70)
-	b.Visible          = false
-	b.Parent           = playersGroup
+	b.BorderColor3 = Color3.fromRGB(70, 70, 70)
+	b.Visible = false; b.Parent = playersGroup
 	table.insert(espSubOptions, b)
 	colorButtons[i] = b
 	b.MouseButton1Click:Connect(function()
@@ -808,27 +989,20 @@ for i, mode in ipairs(colorModes) do
 end
 colorButtons[1].BackgroundColor3 = Color3.fromRGB(50, 50, 50)
 
-local fillSlider = slider(playersGroup, "Fill Alpha", 22, 180, 0, 100, 50, function(v)
-	espFillAlpha = v / 100
-end)
-fillSlider.Visible = false
-table.insert(espSubOptions, fillSlider)
+local fillSlider = slider(playersGroup, "Fill Alpha", 22, 180, 0, 100, 50, function(v) espFillAlpha = v/100 end)
+fillSlider.Visible = false; table.insert(espSubOptions, fillSlider)
 
-local outlineSlider = slider(playersGroup, "Outline Alpha", 22, 218, 0, 100, 0, function(v)
-	espOutlineAlpha = v / 100
-end)
-outlineSlider.Visible = false
-table.insert(espSubOptions, outlineSlider)
+local outlineSlider = slider(playersGroup, "Outline Alpha", 22, 218, 0, 100, 0, function(v) espOutlineAlpha = v/100 end)
+outlineSlider.Visible = false; table.insert(espSubOptions, outlineSlider)
 
 -- ── World group UI ────────────────────────────────────────────────────────────
+local spawnHighlights = {}
+
 checkbox(worldGroup, "Fullbright", 12, 18, function(enabled)
 	if enabled then
-		Lighting.Brightness     = 3
-		Lighting.ClockTime      = 15
-		Lighting.FogEnd         = 100000
-		Lighting.GlobalShadows  = false
-		Lighting.Ambient        = Color3.new(1, 1, 1)
-		Lighting.OutdoorAmbient = Color3.new(1, 1, 1)
+		Lighting.Brightness = 3; Lighting.ClockTime = 15; Lighting.FogEnd = 100000
+		Lighting.GlobalShadows = false
+		Lighting.Ambient = Color3.new(1,1,1); Lighting.OutdoorAmbient = Color3.new(1,1,1)
 	else
 		Lighting.Brightness     = originalLighting.Brightness
 		Lighting.ClockTime      = originalLighting.ClockTime
@@ -854,32 +1028,31 @@ checkbox(worldGroup, "Remove Materials", 12, 78, function(enabled)
 end)
 
 checkbox(worldGroup, "Show Spawns", 12, 98, function(enabled)
-	for _, v in ipairs(workspace:GetDescendants()) do
-		if v:IsA("SpawnLocation") then
-			if enabled then
-				if not v:FindFirstChild("SpawnESP") then
-					local h = Instance.new("Highlight")
-					h.Name                = "SpawnESP"
-					h.Adornee             = v
-					h.FillTransparency    = 0.8
-					h.OutlineTransparency = 1
-					h.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
-					h.Parent              = v
-				end
-			else
-				local h = v:FindFirstChild("SpawnESP")
-				if h then h:Destroy() end
+	if enabled then
+		for _, v in ipairs(workspace:GetDescendants()) do
+			if v:IsA("SpawnLocation") and not spawnHighlights[v] then
+				local h = Instance.new("Highlight")
+				h.Name = "SpawnESP"; h.Adornee = v
+				h.FillTransparency = 0.8; h.OutlineTransparency = 1
+				h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+				h.Parent = v
+				spawnHighlights[v] = h
 			end
 		end
+	else
+		for v, h in pairs(spawnHighlights) do
+			if h and h.Parent then h:Destroy() end
+		end
+		spawnHighlights = {}
 	end
 end)
 
 checkbox(worldGroup, "Night Vision", 12, 118, function(enabled)
 	if enabled then
-		Lighting.Brightness     = 0.5
-		Lighting.Ambient        = Color3.fromRGB(0, 60, 0)
+		Lighting.Brightness = 0.5
+		Lighting.Ambient = Color3.fromRGB(0, 60, 0)
 		Lighting.OutdoorAmbient = Color3.fromRGB(0, 80, 20)
-		Lighting.FogEnd         = 100000
+		Lighting.FogEnd = 100000
 	else
 		Lighting.Brightness     = originalLighting.Brightness
 		Lighting.Ambient        = originalLighting.Ambient
@@ -889,22 +1062,14 @@ checkbox(worldGroup, "Night Vision", 12, 118, function(enabled)
 end)
 
 checkbox(worldGroup, "Remove Decals", 12, 138, function(enabled)
-	if enabled then
-		for _, v in ipairs(workspace:GetDescendants()) do
-			if v:IsA("Decal") or v:IsA("Texture") or v:IsA("SpecialMesh") then
-				v.Transparency = 1
-			end
-		end
-	else
-		for _, v in ipairs(workspace:GetDescendants()) do
-			if v:IsA("Decal") or v:IsA("Texture") then
-				v.Transparency = 0
-			end
+	for _, v in ipairs(workspace:GetDescendants()) do
+		if v:IsA("Decal") or v:IsA("Texture") or v:IsA("SpecialMesh") then
+			v.Transparency = enabled and 1 or 0
 		end
 	end
 end)
 
-local wireframeEnabled = false
+local wireframeEnabled    = false
 local wireframeHighlights = {}
 checkbox(worldGroup, "Wireframe World", 12, 158, function(enabled)
 	wireframeEnabled = enabled
@@ -913,12 +1078,10 @@ checkbox(worldGroup, "Wireframe World", 12, 158, function(enabled)
 			if v:IsA("BasePart") and not v:IsDescendantOf(player.Character or Instance.new("Folder")) then
 				if not wireframeHighlights[v] then
 					local h = Instance.new("Highlight")
-					h.Adornee             = v
-					h.FillTransparency    = 1
-					h.OutlineTransparency = 0
-					h.OutlineColor        = Color3.fromRGB(0, 200, 255)
-					h.DepthMode           = Enum.HighlightDepthMode.Occluded
-					h.Parent              = v
+					h.Adornee = v; h.FillTransparency = 1; h.OutlineTransparency = 0
+					h.OutlineColor = Color3.fromRGB(0, 200, 255)
+					h.DepthMode = Enum.HighlightDepthMode.Occluded
+					h.Parent = v
 					wireframeHighlights[v] = h
 				end
 				v.LocalTransparencyModifier = 1
@@ -927,9 +1090,7 @@ checkbox(worldGroup, "Wireframe World", 12, 158, function(enabled)
 	else
 		for part, h in pairs(wireframeHighlights) do
 			if h and h.Parent then h:Destroy() end
-			if part and part.Parent then
-				part.LocalTransparencyModifier = 0
-			end
+			if part and part.Parent then part.LocalTransparencyModifier = 0 end
 		end
 		wireframeHighlights = {}
 	end
@@ -945,17 +1106,50 @@ slider(worldGroup, "Fog Distance", 12, 225, 0, 10000, math.floor(Lighting.FogEnd
 end)
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- MISC PAGE  –  Movement (noclip + fly only) + Credits
--- Removed: Speed Hack, Walk Speed slider, Custom Jump, Jump Power slider, Inf Jump
+-- MISC PAGE
 -- ═══════════════════════════════════════════════════════════════════════════════
 local movementGroup = group(pages.Misc, "Movement", PAD, PAD, 275, 160)
 local creditsGroup  = group(pages.Misc, "Credits",  305, PAD, 275, 200)
 
--- ── State ────────────────────────────────────────────────────────────────────
 local noclipEnabled  = false
 local flyEnabled     = false
 local flySpeed       = 50
 local antiAFKEnabled = false
+
+local noclipParts = {}
+
+local function cacheNoclipParts(char)
+	noclipParts = {}
+	for _, part in ipairs(char:GetDescendants()) do
+		if part:IsA("BasePart") then noclipParts[#noclipParts+1] = part end
+	end
+
+	char.DescendantAdded:Connect(function(d)
+		if d:IsA("BasePart") then noclipParts[#noclipParts+1] = d end
+	end)
+end
+
+player.CharacterAdded:Connect(function(char)
+	task.wait(0.1)
+	cacheNoclipParts(char)
+end)
+if player.Character then cacheNoclipParts(player.Character) end
+
+checkbox(movementGroup, "Noclip", 12, 18, function(enabled)
+	noclipEnabled = enabled
+	if not enabled then
+		for _, part in ipairs(noclipParts) do
+			if part and part.Parent then part.CanCollide = true end
+		end
+	end
+end)
+
+RunService.Stepped:Connect(function()
+	if not noclipEnabled then return end
+	for _, part in ipairs(noclipParts) do
+		if part and part.Parent then part.CanCollide = false end
+	end
+end)
 
 local function getCharHum()
 	local char = player.Character
@@ -963,32 +1157,9 @@ local function getCharHum()
 	return char, char:FindFirstChildOfClass("Humanoid")
 end
 
--- ── Noclip ───────────────────────────────────────────────────────────────────
-checkbox(movementGroup, "Noclip", 12, 18, function(enabled)
-	noclipEnabled = enabled
-	if not enabled then
-		local char = player.Character
-		if char then
-			for _, part in ipairs(char:GetDescendants()) do
-				if part:IsA("BasePart") then part.CanCollide = true end
-			end
-		end
-	end
-end)
-
-RunService.Stepped:Connect(function()
-	if not noclipEnabled then return end
-	local char = player.Character
-	if not char then return end
-	for _, part in ipairs(char:GetDescendants()) do
-		if part:IsA("BasePart") then part.CanCollide = false end
-	end
-end)
-
--- ── Fly ──────────────────────────────────────────────────────────────────────
 checkbox(movementGroup, "Fly", 12, 38, function(enabled)
 	flyEnabled = enabled
-	local char, hum = getCharHum()
+	local _, hum = getCharHum()
 	if hum then hum.PlatformStand = enabled end
 end)
 
@@ -1022,14 +1193,13 @@ player.CharacterAdded:Connect(function(char)
 	end
 end)
 
--- ── Anti-AFK ─────────────────────────────────────────────────────────────────
 checkbox(movementGroup, "Anti-AFK", 12, 98, function(enabled)
 	antiAFKEnabled = enabled
 end)
 
 local antiAFKTimer = 0
 RunService.Heartbeat:Connect(function(dt)
-	if not antiAFKEnabled then antiAFKTimer = 0 return end
+	if not antiAFKEnabled then antiAFKTimer = 0; return end
 	antiAFKTimer += dt
 	if antiAFKTimer >= 60 then
 		antiAFKTimer = 0
@@ -1039,7 +1209,6 @@ RunService.Heartbeat:Connect(function(dt)
 	end
 end)
 
--- ── Credits ───────────────────────────────────────────────────────────────────
 local credits = Instance.new("TextLabel")
 credits.Size                   = UDim2.new(1, -20, 1, -30)
 credits.Position               = UDim2.fromOffset(10, 20)
@@ -1051,12 +1220,12 @@ credits.Font                   = Enum.Font.Code
 credits.TextSize               = 13
 credits.TextColor3             = Color3.fromRGB(220, 220, 220)
 credits.Text                   = [[
-Developed by: Kvnny14
+Developed by: KvnnyCel14
 
 Contributors:
 - ksaloll
 
-Current Version: 0.7
+Current Version: 0.8
 
 Z-CORD
 SKIBIDIWARE
@@ -1081,38 +1250,29 @@ keybindButton.Parent           = settingsGroup
 
 local waitingForKey = false
 keybindButton.MouseButton1Click:Connect(function()
-	waitingForKey      = true
-	keybindButton.Text = "..."
+	waitingForKey = true; keybindButton.Text = "..."
 end)
 
 UIS.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then return end
 	if waitingForKey and input.UserInputType == Enum.UserInputType.Keyboard then
-		menuKey            = input.KeyCode
+		menuKey = input.KeyCode
 		keybindButton.Text = string.upper(menuKey.Name)
-		waitingForKey      = false
+		waitingForKey = false
 		return
 	end
-	if input.KeyCode == menuKey then
-		gui.Enabled = not gui.Enabled
-	end
+	if input.KeyCode == menuKey then gui.Enabled = not gui.Enabled end
 end)
 
 local keybindLabel = Instance.new("TextLabel")
-keybindLabel.Size                   = UDim2.fromOffset(100, 20)
-keybindLabel.Position               = UDim2.fromOffset(80, 20)
-keybindLabel.BackgroundTransparency = 1
-keybindLabel.Font                   = Enum.Font.Arial
-keybindLabel.TextSize               = 12
-keybindLabel.TextColor3             = Color3.fromRGB(220, 220, 220)
-keybindLabel.TextXAlignment         = Enum.TextXAlignment.Left
-keybindLabel.Text                   = "Menu Keybind"
-keybindLabel.Parent                 = settingsGroup
+keybindLabel.Size = UDim2.fromOffset(100, 20); keybindLabel.Position = UDim2.fromOffset(80, 20)
+keybindLabel.BackgroundTransparency = 1; keybindLabel.Font = Enum.Font.Arial; keybindLabel.TextSize = 12
+keybindLabel.TextColor3 = Color3.fromRGB(220, 220, 220); keybindLabel.TextXAlignment = Enum.TextXAlignment.Left
+keybindLabel.Text = "Menu Keybind"; keybindLabel.Parent = settingsGroup
 
 -- ── Watermark ─────────────────────────────────────────────────────────────────
-local watermarkGui       = nil
-local watermarkScreenGui = nil
-local wmDragging         = false
+local watermarkGui, watermarkScreenGui, wmInfo, wmWare, wmTopBar
+local wmDragging = false
 local wmDragStart, wmStartPos
 
 local function getPing()
@@ -1126,11 +1286,8 @@ local function getPing()
 end
 
 local function removeWatermark()
-	if watermarkScreenGui then
-		watermarkScreenGui:Destroy()
-		watermarkScreenGui = nil
-	end
-	watermarkGui = nil
+	if watermarkScreenGui then watermarkScreenGui:Destroy(); watermarkScreenGui = nil end
+	watermarkGui = nil; wmInfo = nil; wmWare = nil; wmTopBar = nil
 end
 
 local fps        = 0
@@ -1140,60 +1297,41 @@ local lastFPSUpdate = tick()
 local function createWatermark()
 	if watermarkGui then return end
 	watermarkScreenGui = Instance.new("ScreenGui")
-	watermarkScreenGui.Name           = "SkibidiWareWatermark"
-	watermarkScreenGui.ResetOnSpawn   = false
-	watermarkScreenGui.IgnoreGuiInset = true
-	watermarkScreenGui.Parent         = CoreGui
+	watermarkScreenGui.Name = "SkibidiWareWatermark"
+	watermarkScreenGui.ResetOnSpawn = false; watermarkScreenGui.IgnoreGuiInset = true
+	watermarkScreenGui.Parent = CoreGui
 
 	watermarkGui = Instance.new("Frame")
-	watermarkGui.Size             = UDim2.fromOffset(340, 24)
-	watermarkGui.Position         = UDim2.fromOffset(200, 200)
+	watermarkGui.Size = UDim2.fromOffset(340, 24); watermarkGui.Position = UDim2.fromOffset(200, 200)
 	watermarkGui.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-	watermarkGui.BorderColor3     = Color3.fromRGB(45, 45, 45)
-	watermarkGui.Active           = true
-	watermarkGui.Parent           = watermarkScreenGui
+	watermarkGui.BorderColor3 = Color3.fromRGB(45, 45, 45)
+	watermarkGui.Active = true; watermarkGui.Parent = watermarkScreenGui
 
-	local wmTopBar = Instance.new("Frame")
-	wmTopBar.Size            = UDim2.new(1, 0, 0, 2)
-	wmTopBar.BorderSizePixel = 0
-	wmTopBar.Parent          = watermarkGui
+	wmTopBar = Instance.new("Frame")
+	wmTopBar.Size = UDim2.new(1, 0, 0, 2); wmTopBar.BorderSizePixel = 0; wmTopBar.Parent = watermarkGui
 
 	local wmSkibidi = Instance.new("TextLabel")
-	wmSkibidi.BackgroundTransparency = 1
-	wmSkibidi.Position       = UDim2.fromOffset(8, 3)
-	wmSkibidi.Size           = UDim2.fromOffset(45, 18)
-	wmSkibidi.Font           = Enum.Font.ArialBold
-	wmSkibidi.TextSize       = 14
-	wmSkibidi.TextColor3     = Color3.fromRGB(255, 255, 255)
-	wmSkibidi.TextXAlignment = Enum.TextXAlignment.Left
-	wmSkibidi.Text           = "Skibidi"
-	wmSkibidi.Parent         = watermarkGui
+	wmSkibidi.BackgroundTransparency = 1; wmSkibidi.Position = UDim2.fromOffset(8, 3)
+	wmSkibidi.Size = UDim2.fromOffset(45, 18); wmSkibidi.Font = Enum.Font.ArialBold
+	wmSkibidi.TextSize = 14; wmSkibidi.TextColor3 = Color3.fromRGB(255, 255, 255)
+	wmSkibidi.TextXAlignment = Enum.TextXAlignment.Left; wmSkibidi.Text = "Skibidi"
+	wmSkibidi.Parent = watermarkGui
 
-	local wmWare = Instance.new("TextLabel")
-	wmWare.BackgroundTransparency = 1
-	wmWare.Position       = UDim2.fromOffset(52, 3)
-	wmWare.Size           = UDim2.fromOffset(40, 18)
-	wmWare.Font           = Enum.Font.ArialBold
-	wmWare.TextSize       = 14
-	wmWare.TextXAlignment = Enum.TextXAlignment.Left
-	wmWare.Text           = "Ware"
-	wmWare.Parent         = watermarkGui
+	wmWare = Instance.new("TextLabel")
+	wmWare.BackgroundTransparency = 1; wmWare.Position = UDim2.fromOffset(52, 3)
+	wmWare.Size = UDim2.fromOffset(40, 18); wmWare.Font = Enum.Font.ArialBold
+	wmWare.TextSize = 14; wmWare.TextXAlignment = Enum.TextXAlignment.Left
+	wmWare.Text = "Ware"; wmWare.Parent = watermarkGui
 
-	local wmInfo = Instance.new("TextLabel")
-	wmInfo.BackgroundTransparency = 1
-	wmInfo.Position       = UDim2.fromOffset(92, 3)
-	wmInfo.Size           = UDim2.fromOffset(240, 18)
-	wmInfo.Font           = Enum.Font.Arial
-	wmInfo.TextSize       = 13
-	wmInfo.TextColor3     = Color3.fromRGB(220, 220, 220)
-	wmInfo.TextXAlignment = Enum.TextXAlignment.Left
-	wmInfo.Parent         = watermarkGui
+	wmInfo = Instance.new("TextLabel")
+	wmInfo.BackgroundTransparency = 1; wmInfo.Position = UDim2.fromOffset(92, 3)
+	wmInfo.Size = UDim2.fromOffset(240, 18); wmInfo.Font = Enum.Font.Arial
+	wmInfo.TextSize = 13; wmInfo.TextColor3 = Color3.fromRGB(220, 220, 220)
+	wmInfo.TextXAlignment = Enum.TextXAlignment.Left; wmInfo.Parent = watermarkGui
 
 	watermarkGui.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			wmDragging  = true
-			wmDragStart = input.Position
-			wmStartPos  = watermarkGui.Position
+			wmDragging = true; wmDragStart = input.Position; wmStartPos = watermarkGui.Position
 		end
 	end)
 	watermarkGui.InputEnded:Connect(function(input)
@@ -1202,48 +1340,39 @@ local function createWatermark()
 	UIS.InputChanged:Connect(function(input)
 		if wmDragging and input.UserInputType == Enum.UserInputType.MouseMovement then
 			local delta = input.Position - wmDragStart
-			watermarkGui.Position = UDim2.new(
-				wmStartPos.X.Scale, wmStartPos.X.Offset + delta.X,
-				wmStartPos.Y.Scale, wmStartPos.Y.Offset + delta.Y
-			)
+			watermarkGui.Position = UDim2.new(wmStartPos.X.Scale, wmStartPos.X.Offset + delta.X, wmStartPos.Y.Scale, wmStartPos.Y.Offset + delta.Y)
 		end
 	end)
 
 	table.insert(_G._SW_RainbowFills, wmTopBar)
 	table.insert(_G._SW_RainbowFills, wmWare)
-
-	RunService.RenderStepped:Connect(function()
-		if not watermarkGui then return end
-		wmInfo.Text = string.format("| FPS: %d | Ping: %s", fps, getPing())
-	end)
 end
 
 checkbox(settingsGroup, "Watermark", 10, 50, function(enabled)
 	if enabled then createWatermark() else removeWatermark() end
 end)
 
--- ── Master RenderStepped ──────────────────────────────────────────────────────
-RunService.RenderStepped:Connect(function()
-	local c = rainbow()
+local pingUpdateTimer = 0
+local cachedPing      = "?"
+
+RunService.RenderStepped:Connect(function(dt)
+	currentRainbow = rainbow()
+	local c = currentRainbow
 
 	accent.BackgroundColor3 = c
 	wareLabel.TextColor3    = c
-
-	for _, v in ipairs(workspace:GetDescendants()) do
-		local esp = v:FindFirstChild("SpawnESP")
-		if esp and esp:IsA("Highlight") then
-			esp.FillColor    = c
-			esp.OutlineColor = c
+s
+	for _, h in pairs(spawnHighlights) do
+		if h and h.Parent then
+			h.FillColor    = c
+			h.OutlineColor = c
 		end
 	end
 
 	for _, fill in ipairs(_G._SW_RainbowFills) do
 		if fill and fill.Parent then
-			if fill:IsA("TextLabel") then
-				fill.TextColor3 = c
-			else
-				fill.BackgroundColor3 = c
-			end
+			if fill:IsA("TextLabel") then fill.TextColor3    = c
+			else                          fill.BackgroundColor3 = c end
 		end
 	end
 
@@ -1253,5 +1382,14 @@ RunService.RenderStepped:Connect(function()
 		fps           = math.floor(frameCount / (now - lastFPSUpdate))
 		frameCount    = 0
 		lastFPSUpdate = now
+	end
+
+	if wmInfo then
+		pingUpdateTimer += dt
+		if pingUpdateTimer >= 2 then
+			pingUpdateTimer = 0
+			cachedPing      = getPing()
+		end
+		wmInfo.Text = string.format("| FPS: %d | Ping: %s", fps, cachedPing)
 	end
 end)
