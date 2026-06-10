@@ -680,7 +680,7 @@ checkbox(hitboxGroup, "Enable Head Hitbox", 12, 18, function(enabled)
 	end
 end)
 
-slider(hitboxGroup, "Head Scale", 12, 38, 1, 10, 1, function(val)
+slider(hitboxGroup, "Head Scale", 12, 38, 1, 250, 1, function(val)
 	headScale = val
 	if hitboxEnabled then applyHitboxScale() end
 end)
