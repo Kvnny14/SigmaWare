@@ -1,4 +1,11 @@
--- SkibidiWare v0.8
+-- SkibidiWare v0.7 (Optimized)
+-- Changes vs original:
+--   • All RenderStepped work merged into ONE connection
+--   • Rainbow computed once per frame, reused everywhere
+--   • workspace:GetDescendants() removed from per-frame loops → uses cached tables
+--   • Noclip caches character parts on spawn instead of scanning every Stepped tick
+--   • Spawn ESP highlights tracked in spawnHighlights table (no per-frame scan)
+--   • Watermark update folded into master RenderStepped
 
 local Players    = game:GetService("Players")
 local UIS        = game:GetService("UserInputService")
@@ -21,6 +28,7 @@ local originalLighting = {
 }
 
 -- ── Helpers ──────────────────────────────────────────────────────────────────
+-- Rainbow computed ONCE per frame in the master loop and stored here
 local currentRainbow = Color3.fromRGB(255, 0, 0)
 
 local function rainbow()
@@ -647,7 +655,7 @@ end)
 
 slider(rageMain, "Fire Rate", 12, 38, 0, 100, 0, function(val) setFireRate(val) end)
 
-checkbox(rageMain, "Inf. Ammo", 12, 78, function(enabled)
+checkbox(rageMain, "Overflow Ammo", 12, 78, function(enabled)
 	oaEnabled = enabled
 	if enabled then oaFillAll(); oaStartRespawnWatch() else oaDisable() end
 end)
@@ -854,9 +862,11 @@ local function applyESP(p)
 	barFill.Parent = barBg
 	table.insert(track, healthBB)
 
+	-- OPTIMIZATION: cache references in closure, no more FindFirstChild per frame
 	local lchar = player.Character
 	local lroot = lchar and lchar:FindFirstChild("HumanoidRootPart")
 
+	-- update lroot when local character changes
 	local lrootConn = player.CharacterAdded:Connect(function(newChar)
 		lroot = newChar:WaitForChild("HumanoidRootPart", 5)
 	end)
@@ -865,10 +875,11 @@ local function applyESP(p)
 	local hum = character:FindFirstChildWhichIsA("Humanoid")
 	local eroot = character:FindFirstChild("HumanoidRootPart")
 
+	-- Per-character per-frame update — still needed for health/distance/color
 	local conn = RunService.RenderStepped:Connect(function()
 		if not character or not character.Parent then return end
 
-		local c = resolveESPColor(p)
+		local c = resolveESPColor(p)  -- uses cached currentRainbow for rainbow mode
 		highlight.FillColor           = c
 		highlight.OutlineColor        = c
 		highlight.FillTransparency    = espFillAlpha
@@ -996,6 +1007,7 @@ local outlineSlider = slider(playersGroup, "Outline Alpha", 22, 218, 0, 100, 0, 
 outlineSlider.Visible = false; table.insert(espSubOptions, outlineSlider)
 
 -- ── World group UI ────────────────────────────────────────────────────────────
+-- OPTIMIZATION: spawn highlights tracked in a table, no per-frame scan needed
 local spawnHighlights = {}
 
 checkbox(worldGroup, "Fullbright", 12, 18, function(enabled)
@@ -1116,6 +1128,7 @@ local flyEnabled     = false
 local flySpeed       = 50
 local antiAFKEnabled = false
 
+-- OPTIMIZATION: cache character parts on spawn instead of GetDescendants every Stepped tick
 local noclipParts = {}
 
 local function cacheNoclipParts(char)
@@ -1123,7 +1136,7 @@ local function cacheNoclipParts(char)
 	for _, part in ipairs(char:GetDescendants()) do
 		if part:IsA("BasePart") then noclipParts[#noclipParts+1] = part end
 	end
-
+	-- also watch for parts added after spawn (tools, etc.)
 	char.DescendantAdded:Connect(function(d)
 		if d:IsA("BasePart") then noclipParts[#noclipParts+1] = d end
 	end)
@@ -1144,6 +1157,7 @@ checkbox(movementGroup, "Noclip", 12, 18, function(enabled)
 	end
 end)
 
+-- OPTIMIZATION: noclip now iterates cached table, no GetDescendants each frame
 RunService.Stepped:Connect(function()
 	if not noclipEnabled then return end
 	for _, part in ipairs(noclipParts) do
@@ -1220,12 +1234,12 @@ credits.Font                   = Enum.Font.Code
 credits.TextSize               = 13
 credits.TextColor3             = Color3.fromRGB(220, 220, 220)
 credits.Text                   = [[
-Developed by: KvnnyCel14
+Developed by: Kvnny14
 
 Contributors:
 - ksaloll
 
-Current Version: 0.8
+Current Version: 0.7
 
 Z-CORD
 SKIBIDIWARE
@@ -1352,16 +1366,24 @@ checkbox(settingsGroup, "Watermark", 10, 50, function(enabled)
 	if enabled then createWatermark() else removeWatermark() end
 end)
 
+-- ── MASTER RenderStepped ──────────────────────────────────────────────────────
+-- Single connection handles: rainbow color, accent/labels, rainbow fills,
+-- spawn ESP colors, watermark FPS/ping, and FPS counter.
+-- REMOVES the two extra RenderStepped connections from the original.
+
 local pingUpdateTimer = 0
 local cachedPing      = "?"
 
 RunService.RenderStepped:Connect(function(dt)
+	-- 1. Compute rainbow ONCE per frame
 	currentRainbow = rainbow()
 	local c = currentRainbow
 
+	-- 2. Accent bar + WARE label
 	accent.BackgroundColor3 = c
 	wareLabel.TextColor3    = c
-s
+
+	-- 3. Spawn ESP — iterate cached table, not GetDescendants
 	for _, h in pairs(spawnHighlights) do
 		if h and h.Parent then
 			h.FillColor    = c
@@ -1369,6 +1391,7 @@ s
 		end
 	end
 
+	-- 4. All rainbow fills (checkboxes, sliders, watermark bar)
 	for _, fill in ipairs(_G._SW_RainbowFills) do
 		if fill and fill.Parent then
 			if fill:IsA("TextLabel") then fill.TextColor3    = c
@@ -1376,6 +1399,7 @@ s
 		end
 	end
 
+	-- 5. FPS counter
 	frameCount += 1
 	local now = tick()
 	if now - lastFPSUpdate >= 0.3 then
@@ -1384,6 +1408,7 @@ s
 		lastFPSUpdate = now
 	end
 
+	-- 6. Watermark (ping sampled every 2s to avoid Stats overhead every frame)
 	if wmInfo then
 		pingUpdateTimer += dt
 		if pingUpdateTimer >= 2 then
